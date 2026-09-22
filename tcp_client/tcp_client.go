@@ -23,6 +23,16 @@ import (
 
 func main() {
 	log.Println("Starting up tcp_client")
+	if len(os.Args) < 2 {
+		log.Fatalln("requires server argument")
+	}
+	ipAddr := net.ParseIP(os.Args[1]).To4()
+	if ipAddr == nil {
+		log.Fatal("argument must be valid IPv4 address")
+	}
+
+	var ipv4Addr [4]byte
+	copy(ipv4Addr[:], ipAddr)
 
 	// create a lil IPv4 UDP socket
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
@@ -36,7 +46,7 @@ func main() {
 	// send the message to destination address
 	if err := syscall.Sendto(fd, []byte("Hello from Go!"), 0, &syscall.SockaddrInet4{
 		Port: 5000,
-		Addr: [4]byte{34, 19, 101, 183},
+		Addr: ipv4Addr,
 	}); err != nil {
 		panic(err)
 	}
@@ -94,6 +104,11 @@ func main() {
 	}
 	fmt.Println("Sent punch packet directly to peer")
 
+	// gVisor requires the file descriptor to be non-blocking
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		panic(err)
+	}
+
 	// step 3.5: set default addr for fdbased endpoint
 	if err := syscall.Connect(fd, peerAddr); err != nil {
 		log.Fatalln("cannot connect to peer address:", err)
@@ -128,31 +143,37 @@ func main() {
 	}})
 
 	// Add address to NIC
-	localAddress := tcpip.AddrFrom4Slice([]byte("\x7f\x00\x00\x02"))
+	serverIP := []byte{10, 0, 0, 1}
+	clientIP := []byte{10, 0, 0, 2}
+	localIP, remoteIP := serverIP, clientIP
+	if !isServer {
+		localIP, remoteIP = clientIP, serverIP
+	}
+	localAddress := tcpip.AddrFrom4Slice(localIP)
+	remoteAddress := tcpip.AddrFrom4Slice(remoteIP)
 
 	if err := s.AddProtocolAddress(nicID, tcpip.ProtocolAddress{
 		Protocol: ipv4.ProtocolNumber,
 		AddressWithPrefix: tcpip.AddressWithPrefix{
 			Address:   localAddress,
-			PrefixLen: 8,
+			PrefixLen: 24,
 		},
 	}, stack.AddressProperties{}); err != nil {
 		log.Fatalln("add protocol address:", err)
 	}
 
 	const (
-		port     = 5000
+		port     = 6000
 		protocol = ipv4.ProtocolNumber
 	)
-	address := tcpip.AddrFrom4Slice([]byte("\x7f\x00\x00\x01"))
-	fullAddress := tcpip.FullAddress{
-		NIC:  nicID,
-		Addr: address,
-		Port: port,
-	}
 
 	// If server, start listening
 	if isServer {
+		fullAddress := tcpip.FullAddress{
+			NIC:  nicID,
+			Addr: localAddress,
+			Port: port,
+		}
 		l, err := gonet.ListenTCP(s, fullAddress, protocol)
 		if err != nil {
 			log.Fatalln("ListenTCP:", err)
@@ -163,6 +184,12 @@ func main() {
 		}
 		handleConn(conn)
 	} else { // Not server, client dials
+		fullAddress := tcpip.FullAddress{
+			NIC:  nicID,
+			Addr: remoteAddress,
+			Port: port,
+		}
+
 		time.Sleep(5 * time.Second) // give the server time to listen
 		ctx := context.Background()
 

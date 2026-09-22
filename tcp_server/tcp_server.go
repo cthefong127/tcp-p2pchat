@@ -57,22 +57,27 @@ func main() {
 
 			continue
 		}
+		registerPeers(registry, v4Addr, syscall.Sendto, fd)
 
-		for key, v4Addr2 := range registry {
-			delete(registry, key)
-			if err := syscall.Sendto(fd, []byte("CLIENT "+key), 0, v4Addr); err != nil {
-				fmt.Println("send err:", err)
-				continue
-			}
-			key2 := fmt.Sprintf("%d.%d.%d.%d:%d",
-				v4Addr2.Addr[0], v4Addr2.Addr[1], v4Addr2.Addr[2], v4Addr2.Addr[3], v4Addr2.Port)
+	}
+}
 
-			if err := syscall.Sendto(fd, []byte("SERVER "+key2), 0, v4Addr2); err != nil {
-				fmt.Println("send err:", err)
-				continue
-			}
+func registerPeers(registry map[string]*syscall.SockaddrInet4, v4Addr *syscall.SockaddrInet4, sendTo func(int, []byte, int, syscall.Sockaddr) error, fd int) {
+	for key2, v4Addr2 := range registry {
+		delete(registry, key2)
+		key := fmt.Sprintf("%d.%d.%d.%d:%d",
+			v4Addr.Addr[0], v4Addr.Addr[1], v4Addr.Addr[2], v4Addr.Addr[3], v4Addr.Port)
 
-			fmt.Printf("Introduced %s <-> %s\n", key, key2)
+		if err := sendTo(fd, []byte("SERVER "+key), 0, v4Addr2); err != nil {
+			fmt.Println("send err:", err)
+			continue
 		}
+
+		if err := sendTo(fd, []byte("CLIENT "+key2), 0, v4Addr); err != nil {
+			fmt.Println("send err:", err)
+			continue
+		}
+
+		fmt.Printf("Introduced %s <-> %s\n", key, key2)
 	}
 }
