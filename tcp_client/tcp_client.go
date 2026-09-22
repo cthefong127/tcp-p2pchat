@@ -3,8 +3,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"os"
 	"strconv"
@@ -182,6 +189,23 @@ func main() {
 		if err != nil {
 			log.Fatalln("accept:", err)
 		}
+		// TLS server
+		tlsCert, err := generateEphemeralCert()
+		if err != nil {
+			log.Fatalln("TLS certificate generation:", err)
+		}
+		publicKey, err := tlsCert.Leaf.PublicKey.(*ecdsa.PublicKey).Bytes()
+		if err != nil {
+			log.Fatalln("Key not valid:", err)
+		}
+		log.Printf("Server public key: %x", publicKey)
+		log.Println("Compare this with your peer's key over secured channel to authenticate connection")
+		conn = tls.Server(
+			conn,
+			&tls.Config{
+				Certificates: []tls.Certificate{tlsCert},
+			},
+		)
 		handleConn(conn)
 	} else { // Not server, client dials
 		fullAddress := tcpip.FullAddress{
@@ -197,7 +221,24 @@ func main() {
 		if err != nil {
 			log.Fatalln("dial:", err)
 		}
-		handleConn(conn)
+		// TLS client
+		tlsConn := tls.Client(
+			conn,
+			&tls.Config{
+				InsecureSkipVerify: true,
+			},
+		)
+		if err := tlsConn.Handshake(); err != nil {
+			log.Fatalln("TLS handshake:", err)
+		}
+
+		publicKey, err := tlsConn.ConnectionState().PeerCertificates[0].PublicKey.(*ecdsa.PublicKey).Bytes()
+		if err != nil {
+			log.Fatalln("Key not valid:", err)
+		}
+		log.Printf("Server public key: %x", publicKey)
+		log.Println("Compare this with your peer's key over secured channel to authenticate connection")
+		handleConn(tlsConn)
 	}
 }
 
@@ -262,4 +303,45 @@ func parsePeerAddr(s string) (*syscall.SockaddrInet4, error) {
 	}
 
 	return &syscall.SockaddrInet4{Port: port, Addr: addr}, nil
+}
+
+// TLS ephemeral cert gen
+func generateEphemeralCert() (tls.Certificate, error) {
+	// 1. Generate private key
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	// 2. Setup certificate template
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	template := x509.Certificate{
+		SerialNumber:          serialNumber,
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour), // Valid for 1 day
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:              []string{"localhost"},
+	}
+
+	// 3. Self-sign the certificate
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	// 4. Encode to PEM block format
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	b, _ := x509.MarshalECPrivateKey(priv)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b})
+
+	// 5. Load into tls.Certificate
+	return tls.X509KeyPair(certPEM, keyPEM)
 }
